@@ -32,11 +32,11 @@ impl MessageDeframer {
     /// Returns an `Error` if the deframer failed to parse some message contents or if decryption
     /// failed, `Ok(None)` if no full message is buffered or if trial decryption failed, and
     /// `Ok(Some(_))` if a valid message was found and decrypted successfully.
-    pub fn pop<'b>(
+    pub fn pop<'b, 'a: 'b>(
         &mut self,
         record_layer: &mut RecordLayer,
         negotiated_version: Option<ProtocolVersion>,
-        buffer: &mut DeframerSliceBuffer<'b>,
+        buffer: &'a mut DeframerSliceBuffer<'b>,
     ) -> Result<Option<Deframed<'b>>, Error> {
         if let Some(last_err) = self.last_error.clone() {
             return Err(last_err);
@@ -65,7 +65,7 @@ impl MessageDeframer {
             // Does our `buf` contain a full message?  It does if it is big enough to
             // contain a header, and that header has a length which falls within `buf`.
             // If so, deframe it and place the message onto the frames output queue.
-            let mut rd = codec::ReaderMut::init(buffer.filled_get_mut(start..));
+            let mut rd: codec::ReaderMut<'b> = codec::ReaderMut::init(buffer.filled_get_mut(start..));
             let m = match BorrowedOpaqueMessage::read(&mut rd) {
                 Ok(m) => m,
                 Err(msg_err) => {
@@ -161,34 +161,30 @@ impl MessageDeframer {
                 return Err(self.set_err(PeerMisbehaved::MessageInterleavedWithHandshakeMessage));
             }
 
+            let raw_payload = match msg.payload {
+                BorrowedPlainPayload::Single(chunk) => RawSlice::from(chunk),
+                // we can safely ignore the Multiple variant, which is used only for writing, never for reading
+                BorrowedPlainPayload::Empty | BorrowedPlainPayload::Multiple { .. } => todo!(),
+            };
+
             // If it's not a handshake message, just return it -- no joining necessary.
             if msg.typ != ContentType::Handshake {
-                let BorrowedPlainMessage {
-                    typ,
-                    version,
-                    payload,
-                } = msg;
-                let raw_payload = RawSlice::from(payload);
+                let _slice = buffer.take(raw_payload);
+
                 let end = start + rd.used();
                 buffer.queue_discard(end);
-                let message = BorrowedPlainMessage {
-                    typ,
-                    version,
-                    payload: BorrowedPlainPayload::new_single(buffer.take(raw_payload)),
-                };
                 return Ok(Some(Deframed {
                     want_close_before_decrypt: false,
                     aligned: true,
                     trial_decryption_finished: false,
-                    message,
+                    message: msg,
                 }));
             }
 
             // If we don't know the payload size yet or if the payload size is larger
             // than the currently buffered payload, we need to wait for more data.
-            let raw = RawSlice::from(msg.payload);
             let version = msg.version;
-            let src = buffer.raw_slice_to_filled_range(raw);
+            let src = buffer.raw_slice_to_filled_range(raw_payload);
             match self.append_hs(version, InternalPayload(src), end, buffer)? {
                 HandshakePayloadState::Blocked => return Ok(None),
                 HandshakePayloadState::Complete(len) => break len,
