@@ -8,7 +8,7 @@ use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
 use crate::msgs::fragmenter::MessageFragmenter;
 use crate::msgs::handshake::CertificateChain;
 use crate::msgs::message::{
-    Message, MessagePayload, OpaqueMessage, OutboundChunks, OutboundMessage, PlainMessage,
+    Message, MessagePayload, OutboundOpaqueMessage, OutboundChunks, OutboundPlainMessage, PlainMessage,
 };
 use crate::quic;
 use crate::record_layer;
@@ -307,7 +307,7 @@ impl CommonState {
         len
     }
 
-    fn send_single_fragment(&mut self, m: OutboundMessage) {
+    fn send_single_fragment(&mut self, m: OutboundPlainMessage) {
         // Close connection once we start to run out of
         // sequence space.
         if self
@@ -397,7 +397,7 @@ impl CommonState {
     }
 
     // Put m into sendable_tls for writing.
-    fn queue_tls_message(&mut self, m: OpaqueMessage) {
+    fn queue_tls_message(&mut self, m: OutboundOpaqueMessage) {
         self.sendable_tls.append(m.encode());
     }
 
@@ -555,7 +555,7 @@ impl CommonState {
         &self,
         outgoing_tls: &mut [u8],
         opt_msg: Option<&[u8]>,
-        fragments: impl Iterator<Item = OutboundMessage<'a>>,
+        fragments: impl Iterator<Item = OutboundPlainMessage<'a>>,
     ) -> Result<(), EncryptError> {
         let mut required_size = 0;
         if let Some(message) = opt_msg {
@@ -579,7 +579,7 @@ impl CommonState {
         &mut self,
         outgoing_tls: &mut [u8],
         opt_msg: Option<Vec<u8>>,
-        fragments: impl Iterator<Item = OutboundMessage<'a>>,
+        fragments: impl Iterator<Item = OutboundPlainMessage<'a>>,
     ) -> usize {
         let mut written = 0;
 
