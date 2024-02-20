@@ -1,5 +1,4 @@
-use crate::enums::ProtocolVersion;
-use crate::enums::{AlertDescription, ContentType, HandshakeType};
+use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerMisbehaved};
 use crate::internal::record_layer::RecordLayer;
 use crate::msgs::alert::AlertMessagePayload;
@@ -11,6 +10,7 @@ use crate::msgs::fragmenter::MAX_FRAGMENT_LEN;
 use crate::msgs::handshake::HandshakeMessagePayload;
 
 use alloc::vec::Vec;
+use core::ops::{Deref, DerefMut};
 
 #[derive(Debug)]
 pub enum MessagePayload<'a> {
@@ -100,32 +100,29 @@ impl<'a> MessagePayload<'a> {
 pub struct OpaqueMessage {
     pub typ: ContentType,
     pub version: ProtocolVersion,
-    payload: Payload<'static>,
+    payload: PrefixedPayload,
 }
 
 impl OpaqueMessage {
     /// Construct a new `OpaqueMessage` from constituent fields.
     ///
     /// `body` is moved into the `payload` field.
-    pub fn new(typ: ContentType, version: ProtocolVersion, body: Vec<u8>) -> Self {
+    pub fn new(typ: ContentType, version: ProtocolVersion, payload: PrefixedPayload) -> Self {
         Self {
             typ,
             version,
-            payload: Payload::new(body),
+            payload,
         }
     }
 
     /// Access the message payload as a slice.
     pub fn payload(&self) -> &[u8] {
-        self.payload.bytes()
+        self.payload.as_ref()
     }
 
     /// Access the message payload as a mutable `Vec<u8>`.
-    pub fn payload_mut(&mut self) -> &mut Vec<u8> {
-        match &mut self.payload {
-            Payload::Borrowed(_) => unreachable!("due to how constructor works"),
-            Payload::Owned(bytes) => bytes,
-        }
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        self.payload.as_mut()
     }
 
     /// `MessageError` allows callers to distinguish between valid prefixes (might
@@ -133,25 +130,24 @@ impl OpaqueMessage {
     pub fn read(r: &mut Reader) -> Result<Self, MessageError> {
         let (typ, version, len) = read_opaque_message_header(r)?;
 
-        let mut sub = r
-            .sub(len as usize)
-            .map_err(|_| MessageError::TooShortForLength)?;
-        let payload = Payload::read(&mut sub).into_owned();
+        let content = r
+            .take(len as usize)
+            .ok_or(MessageError::TooShortForLength)?;
 
         Ok(Self {
             typ,
             version,
-            payload,
+            payload: PrefixedPayload::from(content),
         })
     }
 
     pub fn encode(self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        self.typ.encode(&mut buf);
-        self.version.encode(&mut buf);
-        (self.payload.bytes().len() as u16).encode(&mut buf);
-        self.payload.encode(&mut buf);
-        buf
+        let length = self.payload().len() as u16;
+        let mut encoded_payload = self.payload.0;
+        encoded_payload[0] = self.typ.get_u8();
+        encoded_payload[1..3].copy_from_slice(&self.version.get_u16().to_be_bytes());
+        encoded_payload[3..5].copy_from_slice(&(length).to_be_bytes());
+        encoded_payload
     }
 
     /// Force conversion into a plaintext message.
@@ -162,7 +158,7 @@ impl OpaqueMessage {
         PlainMessage {
             version: self.version,
             typ: self.typ,
-            payload: self.payload,
+            payload: Payload::Owned(self.payload.as_ref().to_vec()),
         }
     }
 
@@ -180,10 +176,66 @@ impl OpaqueMessage {
     const MAX_PAYLOAD: u16 = 16_384 + 2048;
 
     /// Content type, version and size.
-    const HEADER_SIZE: u16 = 1 + 2 + 2;
+    const HEADER_SIZE: usize = 1 + 2 + 2;
 
     /// Maximum on-the-wire message size.
-    pub const MAX_WIRE_SIZE: usize = (Self::MAX_PAYLOAD + Self::HEADER_SIZE) as usize;
+    pub const MAX_WIRE_SIZE: usize = Self::MAX_PAYLOAD as usize + Self::HEADER_SIZE;
+}
+
+#[derive(Clone, Debug)]
+pub struct PrefixedPayload(Vec<u8>);
+
+impl PrefixedPayload {
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut prefixed_payload = Vec::with_capacity(OpaqueMessage::HEADER_SIZE + capacity);
+        prefixed_payload.resize(OpaqueMessage::HEADER_SIZE, 0);
+        Self(prefixed_payload)
+    }
+}
+
+impl AsRef<[u8]> for PrefixedPayload {
+    fn as_ref(&self) -> &[u8] {
+        &self.0[OpaqueMessage::HEADER_SIZE..]
+    }
+}
+
+impl AsMut<[u8]> for PrefixedPayload {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0[OpaqueMessage::HEADER_SIZE..]
+    }
+}
+
+impl<'a> Extend<&'a u8> for PrefixedPayload {
+    fn extend<T: IntoIterator<Item = &'a u8>>(&mut self, iter: T) {
+        self.0.extend(iter)
+    }
+}
+
+impl Deref for PrefixedPayload {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PrefixedPayload {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<&[u8]> for PrefixedPayload {
+    fn from(content: &[u8]) -> Self {
+        Self([&[0u8; OpaqueMessage::HEADER_SIZE], content].concat())
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for PrefixedPayload {
+    fn from(content: &[u8; N]) -> Self {
+        let content: &[u8] = content;
+        Self::from(content)
+    }
 }
 
 /// A borrowed version of [`OpaqueMessage`].
@@ -331,7 +383,7 @@ impl PlainMessage {
         OpaqueMessage {
             version: self.version,
             typ: self.typ,
-            payload: self.payload,
+            payload: PrefixedPayload::from(self.payload.bytes()),
         }
     }
 
@@ -475,14 +527,16 @@ pub struct OutboundMessage<'a> {
 
 impl OutboundMessage<'_> {
     pub(crate) fn encoded_len(&self, record_layer: &RecordLayer) -> usize {
-        OpaqueMessage::HEADER_SIZE as usize + record_layer.encrypted_len(self.payload.len())
+        OpaqueMessage::HEADER_SIZE + record_layer.encrypted_len(self.payload.len())
     }
 
     pub(crate) fn to_unencrypted_opaque(&self) -> OpaqueMessage {
+        let mut payload = PrefixedPayload::with_capacity(self.payload.len());
+        self.payload.copy_to_vec(&mut payload);
         OpaqueMessage {
             version: self.version,
             typ: self.typ,
-            payload: Payload::Owned(self.payload.to_vec()),
+            payload,
         }
     }
 }

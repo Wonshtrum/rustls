@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 use crate::crypto;
 use crate::crypto::cipher::{
@@ -10,7 +9,7 @@ use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::codec::Codec;
-use crate::msgs::message::{InboundMessage, OpaqueMessage, OutboundMessage};
+use crate::msgs::message::{InboundMessage, OpaqueMessage, OutboundMessage, PrefixedPayload};
 use crate::suites::{CipherSuiteCommon, ConnectionTrafficSecrets, SupportedCipherSuite};
 use crate::tls13::Tls13CipherSuite;
 
@@ -194,12 +193,13 @@ struct Tls13MessageDecrypter {
 impl MessageEncrypter for Tls13MessageEncrypter {
     fn encrypt(&mut self, msg: OutboundMessage, seq: u64) -> Result<OpaqueMessage, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
-        let mut payload = Vec::with_capacity(total_len);
-        msg.payload.copy_to_vec(&mut payload);
-        msg.typ.encode(&mut payload);
+        let mut payload = PrefixedPayload::with_capacity(total_len);
 
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
         let aad = aead::Aad::from(make_tls13_aad(total_len));
+        msg.payload.copy_to_vec(&mut payload);
+        msg.typ.encode(&mut payload);
+
         self.enc_key
             .seal_in_place_append_tag(nonce, aad, &mut payload)
             .map_err(|_| Error::EncryptError)?;

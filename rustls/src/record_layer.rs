@@ -247,6 +247,8 @@ pub(crate) struct Decrypted<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::msgs::message::PrefixedPayload;
+
     use super::*;
 
     #[test]
@@ -294,7 +296,7 @@ mod tests {
         let mut msg = OpaqueMessage::new(
             ContentType::Handshake,
             ProtocolVersion::TLSv1_2,
-            vec![0xC0, 0xFF, 0xEE],
+            PrefixedPayload::from(&[0xC0, 0xFF, 0xEE]),
         );
         record_layer
             .decrypt_incoming(msg.borrow())
