@@ -4,7 +4,8 @@ use crate::msgs::message::{MessageError, PlainMessage};
 use crate::{ContentType, ProtocolVersion};
 
 use alloc::vec::Vec;
-use core::ops::{Deref, DerefMut};
+
+use super::OutboundChunks;
 
 /// A TLS frame, named TLSPlaintext in the standard.
 ///
@@ -36,16 +37,6 @@ impl OutboundOpaqueMessage {
         }
     }
 
-    /// Access the message payload as a slice.
-    pub fn payload(&self) -> &[u8] {
-        self.payload.as_ref()
-    }
-
-    /// Access the message payload as a mutable `Vec<u8>`.
-    pub fn payload_mut(&mut self) -> &mut [u8] {
-        self.payload.as_mut()
-    }
-
     /// `MessageError` allows callers to distinguish between valid prefixes (might
     /// become valid if we read more data) and invalid data.
     pub fn read(r: &mut Reader) -> Result<Self, MessageError> {
@@ -63,7 +54,7 @@ impl OutboundOpaqueMessage {
     }
 
     pub fn encode(self) -> Vec<u8> {
-        let length = self.payload().len() as u16;
+        let length = self.payload.len() as u16;
         let mut encoded_payload = self.payload.0;
         encoded_payload[0] = self.typ.get_u8();
         encoded_payload[1..3].copy_from_slice(&self.version.get_u16().to_be_bytes());
@@ -79,7 +70,7 @@ impl OutboundOpaqueMessage {
         PlainMessage {
             version: self.version,
             typ: self.typ,
-            payload: Payload::Owned(self.payload().to_vec()),
+            payload: Payload::Owned(self.payload.to_vec()),
         }
     }
 
@@ -95,7 +86,7 @@ impl OutboundOpaqueMessage {
 }
 
 #[derive(Clone, Debug)]
-pub struct PrefixedPayload(Vec<u8>);
+pub struct PrefixedPayload(pub(super) Vec<u8>);
 
 impl PrefixedPayload {
     pub fn with_capacity(capacity: usize) -> Self {
@@ -104,6 +95,31 @@ impl PrefixedPayload {
         prefixed_payload.resize(OutboundOpaqueMessage::HEADER_SIZE, 0);
         Self(prefixed_payload)
     }
+
+    pub fn len(&self) -> usize {
+        self.0.len() - OutboundOpaqueMessage::HEADER_SIZE
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.as_ref().to_vec()
+    }
+
+    pub fn extend_from_slice(&mut self, slice: &[u8]) {
+        self.0.extend_from_slice(slice)
+    }
+
+    pub fn extend_from_chunks(&mut self, chunks: &OutboundChunks) {
+        chunks.copy_to_vec(&mut self.0)
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.0
+            .truncate(len + OutboundOpaqueMessage::HEADER_SIZE)
+    }
+
+    // pub fn container(&mut self) -> &mut Vec<u8> {
+    //     &mut self.0
+    // }
 }
 
 impl AsRef<[u8]> for PrefixedPayload {
@@ -121,20 +137,6 @@ impl AsMut<[u8]> for PrefixedPayload {
 impl<'a> Extend<&'a u8> for PrefixedPayload {
     fn extend<T: IntoIterator<Item = &'a u8>>(&mut self, iter: T) {
         self.0.extend(iter)
-    }
-}
-
-impl Deref for PrefixedPayload {
-    type Target = Vec<u8>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for PrefixedPayload {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 

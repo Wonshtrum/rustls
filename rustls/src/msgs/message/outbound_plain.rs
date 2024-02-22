@@ -1,4 +1,4 @@
-use crate::{ContentType, ProtocolVersion, internal::record_layer::RecordLayer};
+use crate::{internal::record_layer::RecordLayer, ContentType, ProtocolVersion};
 
 use alloc::vec::Vec;
 
@@ -27,7 +27,7 @@ impl OutboundPlainMessage<'_> {
 
     pub(crate) fn to_unencrypted_opaque(&self) -> OutboundOpaqueMessage {
         let mut payload = PrefixedPayload::with_capacity(self.payload.len());
-        self.payload.copy_to_vec(&mut payload);
+        payload.extend_from_chunks(&self.payload);
         OutboundOpaqueMessage {
             version: self.version,
             typ: self.typ,

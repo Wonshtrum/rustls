@@ -21,11 +21,16 @@ macro_rules! enum_builder {
         }
         impl $enum_name {
             $enum_vis fn $get_uint(&self) -> $uint {
-                let x = self.clone();
-                match x {
+                match self {
                     $( $enum_name::$enum_var => $enum_val),*
-                    ,$enum_name::Unknown(x) => x
+                    ,$enum_name::Unknown(x) => *x
                 }
+            }
+
+            // NOTE(allow) generated irrespective if there are callers
+            #[allow(dead_code)]
+            $enum_vis fn get_slice(&self) -> [u8; std::mem::size_of::<$uint>()] {
+                self.$get_uint().to_le_bytes()
             }
 
             // NOTE(allow) generated irrespective if there are callers
